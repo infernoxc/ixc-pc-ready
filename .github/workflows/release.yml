@@ -1,0 +1,31 @@
+name: Build check
+
+# Compiles the app on a clean Windows machine so every change is verified.
+# Releases are published by the maintainer with the single IXC-PC-Ready.exe.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File build\build.ps1 -NoTest
+
+      - name: Show build log and verify output
+        shell: powershell
+        run: |
+          Get-Content build\build-log.txt
+          if (-not (Test-Path build\out\IXC-PC-Ready.exe)) { throw 'Build failed' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IXC-PC-Ready
+          path: dist/IXC-PC-Ready.exe*

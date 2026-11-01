@@ -1,0 +1,7 @@
+build/out/
+build/build-log.txt
+build/selftest-report.txt
+build/startup-error.txt
+dist/
+*.exe
+*.zip
