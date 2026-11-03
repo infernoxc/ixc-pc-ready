@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
 namespace InfernoXC
@@ -58,6 +59,9 @@ namespace InfernoXC
         public double UptimeDays;
         public bool Hags;
         public List<string> Antivirus = new List<string>();
+        public bool IsLaptop, HasBattery;
+        public string PowerPlan = "", PowerPlanGuid = "";
+        public string GpuSourceNote = "";
         public List<Finding> Findings = new List<Finding>();
 
         public GpuInfo MainGpu
@@ -146,6 +150,17 @@ namespace InfernoXC
                 long vram = VramFromRegistry(n);
                 if (vram <= 0) vram = L(o, "AdapterRAM");
                 g.VramMB = vram / (1024 * 1024);
+                // AdapterRAM is a 32-bit value and caps at 4 GB; NVIDIA's own library knows the real size
+                if (g.VramMB <= 4096 && n.IndexOf("NVIDIA", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    try
+                    {
+                        foreach (NvGpu ng in Nvml.Poll())
+                            if (ng.Name != null && (n.IndexOf(ng.Name.Replace("NVIDIA ", ""), StringComparison.OrdinalIgnoreCase) >= 0 || ng.Name.IndexOf(n.Replace("NVIDIA ", ""), StringComparison.OrdinalIgnoreCase) >= 0) && ng.VramTotalMB > g.VramMB)
+                                g.VramMB = (long)ng.VramTotalMB;
+                    }
+                    catch { }
+                }
                 g.Hz = (int)L(o, "CurrentRefreshRate");
                 long w = L(o, "CurrentHorizontalResolution"), hh = L(o, "CurrentVerticalResolution");
                 if (w > 0 && hh > 0) g.Res = w + "x" + hh;
@@ -164,6 +179,8 @@ namespace InfernoXC
                 h.Ram.Add(m);
                 h.RamTotalGB += m.CapacityGB;
             }
+            if (h.Gpus.Count == 0) { h.GpuFallback(); }
+
             foreach (ManagementBaseObject o in Q("root\\cimv2", "SELECT MemoryDevices FROM Win32_PhysicalMemoryArray"))
                 h.RamSlots += (int)L(o, "MemoryDevices");
 
@@ -214,8 +231,63 @@ namespace InfernoXC
             foreach (ManagementBaseObject o in Q("root\\SecurityCenter2", "SELECT displayName FROM AntiVirusProduct"))
                 h.Antivirus.Add(S(o, "displayName"));
 
+            // laptop or desktop
+            foreach (ManagementBaseObject o in Q("root\\cimv2", "SELECT ChassisTypes FROM Win32_SystemEnclosure"))
+            {
+                try
+                {
+                    ushort[] ct = o["ChassisTypes"] as ushort[];
+                    if (ct != null) foreach (ushort c in ct) if (c == 8 || c == 9 || c == 10 || c == 11 || c == 12 || c == 14 || c == 18 || c == 21 || c == 30 || c == 31 || c == 32) h.IsLaptop = true;
+                }
+                catch { }
+            }
+            foreach (ManagementBaseObject o in Q("root\\cimv2", "SELECT Name FROM Win32_Battery")) { h.HasBattery = true; }
+            if (h.HasBattery && h.Disks.Count > 0 && !h.IsLaptop)
+            {
+                // a battery on a desktop chassis is usually a UPS; treat it as a laptop only if the chassis says so
+            }
+            try
+            {
+                Util.RunResult pr = Util.Run("powercfg.exe", "/getactivescheme", 8000);
+                Match pm = Regex.Match(pr.Out ?? "", @"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*\(([^)]*)\)");
+                if (pm.Success) { h.PowerPlanGuid = pm.Groups[1].Value.ToLowerInvariant(); h.PowerPlan = pm.Groups[2].Value.Trim(); }
+            }
+            catch (Exception ex) { Log.Err("power plan", ex); }
+
             h.BuildFindings();
             return h;
+        }
+
+        /// <summary>If WMI lists no graphics adapter, read them straight from the registry class key.</summary>
+        void GpuFallback()
+        {
+            try
+            {
+                using (RegistryKey cls = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"))
+                {
+                    if (cls == null) return;
+                    foreach (string sub in cls.GetSubKeyNames())
+                    {
+                        if (sub.Length != 4) continue;
+                        using (RegistryKey k = cls.OpenSubKey(sub))
+                        {
+                            if (k == null) continue;
+                            object d = k.GetValue("DriverDesc");
+                            if (d == null) continue;
+                            string n = d.ToString();
+                            if (n.IndexOf("Basic", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("Virtual", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("Remote", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                            GpuInfo g = new GpuInfo();
+                            g.Name = n;
+                            g.Driver = k.GetValue("DriverVersion") == null ? "" : k.GetValue("DriverVersion").ToString();
+                            g.Vendor = k.GetValue("ProviderName") == null ? "" : k.GetValue("ProviderName").ToString();
+                            g.VramMB = VramFromRegistry(n) / (1024 * 1024);
+                            Gpus.Add(g);
+                        }
+                    }
+                }
+                if (Gpus.Count > 0) GpuSourceNote = "Graphics adapters were read from the registry because WMI returned none.";
+            }
+            catch (Exception ex) { Log.Err("GPU registry fallback", ex); }
         }
 
         static string Regex1(string s)

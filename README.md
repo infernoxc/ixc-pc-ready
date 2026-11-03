@@ -41,16 +41,21 @@ To remove it later: **Settings > Apps > Installed apps > IXC PC Ready > Uninstal
 
 | Page | What it does |
 |---|---|
-| **Dashboard** | Live CPU, GPU, RAM and disk load. Reads your hardware in detail and gives plain-English findings (mismatched RAM, monitor refresh rate not being used, no antivirus, and more). |
-| **Processes** | Every running app with its own CPU, GPU, RAM and VRAM use. Games are marked. Set CPU priority and graphics preference per app. |
-| **Game Mode** | One switch before you play: closes the background apps you choose, pauses services you do not need, frees memory and boosts your game. Ends by itself when the game closes and puts everything back. |
-| **Clean & Optimize** | You choose what to clean: temp files, shader caches, crash dumps, update cache, Windows component store, memory. SSD TRIM for SSD and NVMe drives. |
+| **Dashboard** | Live CPU, GPU, RAM and disk load, temperatures, and plain-English findings (mismatched RAM, monitor refresh rate not being used, no antivirus, and more). CPU temperature is read from MSI Afterburner or HWiNFO when one of them is running, because Windows does not expose it without a driver. |
+| **Processes** | Every running app with its own CPU, GPU, RAM and VRAM use. Games are marked. |
+| **Game Mode** | Detects your game the moment it starts and shows a live list of what it is doing. Modes: Competitive, Streaming, Heavy games, Silent/battery, Custom. Ends by itself when the game closes and puts everything back. |
+| **App Profiles** | Every installed app and game, with CPU priority, disk priority, graphics card and fullscreen optimizations. Settings are written into Windows itself, so they stay after a restart with or without this app running. The page shows what the registry holds for each program. |
+| **Clean & Optimize** | Choose what to clean: temp files, shader caches, crash dumps, update cache, Windows component store, memory. SSD TRIM for SSD and NVMe drives. |
+| **Debloat** | Remove apps and switch off services you do not need, each marked Safe, Caution or Avoid. |
+| **Updates** | Scans every installed app through winget, updates the ones you pick with live output and a plain-language reason if one fails, and checks drivers. |
 | **Startup & Services** | Everything that starts with Windows, with an on/off switch. Protected items (security, drivers, anti-cheat) are locked. |
 | **Installed Apps** | Every installed app and game, its size, and what it is using right now. |
-| **Crash Report** | Reads 30 days of Windows logs and explains why apps crashed and what looks mismatched on your PC. |
-| **Smart Tune** | Windows settings chosen for your hardware, with a backup of each value and one-click revert. Laptop-safe. |
+| **Crash Center** | Reads 30 days of Windows logs and explains why apps crashed and what looks mismatched on your PC. |
+| **Smart Tune** | Gaming, Balanced, Competitive, Streaming, Low-end and Laptop levels. Each button shows how many of its settings are on right now, read from Windows. Every value is backed up with one-click revert. |
 
-More screenshots: [Dashboard](docs/screenshots/dashboard.png), [Clean & Optimize](docs/screenshots/clean.png), [Crash Report](docs/screenshots/crash-report.png), [Smart Tune](docs/screenshots/smart-tune.png).
+The window is resizable and adapts to any monitor, including portrait.
+
+More screenshots: [Dashboard](docs/screenshots/dashboard.png), [Clean & Optimize](docs/screenshots/clean.png), [Crash Center](docs/screenshots/crash-report.png), [App Profiles](docs/screenshots/app-profiles.png), [Smart Tune](docs/screenshots/smart-tune.png).
 
 ## How to use it (first time)
 
@@ -61,10 +66,10 @@ More screenshots: [Dashboard](docs/screenshots/dashboard.png), [Clean & Optimize
 
 ## Safety
 
-- No account, no telemetry, no network access. Everything stays on your PC.
+- No account and no telemetry. The only network use is the update check against GitHub and winget when you press an update button.
 - Windows settings are backed up before they change and can be switched back.
 - Startup items are switched off, never deleted.
-- Windows Defender, Firewall, UAC, Windows Update and anti-cheat are never turned off or touched.
+- Windows Defender, Firewall, UAC, Windows Update and anti-cheat are never turned off or touched. Priority settings are never written for Vanguard or Riot programs.
 - It never changes your FPS cap or in-game settings.
 - Game Mode never closes your game, OBS or anti-cheat, and gives paused services back when it ends.
 
@@ -80,7 +85,7 @@ The app asks for administrator rights because reading system data and changing s
 
 **How do I start it with Windows?** *Settings & About > Start with Windows*. It is off by default.
 
-**It found a problem I do not understand.** Open the *Crash Report* page and press *Save report*. Attach that file when you [open an issue](https://github.com/infernoxc/ixc-pc-ready/issues/new).
+**It found a problem I do not understand.** Open the *Crash Center* page and press *Save report*. Attach that file when you [open an issue](https://github.com/infernoxc/ixc-pc-ready/issues/new).
 
 ## Build from source
 

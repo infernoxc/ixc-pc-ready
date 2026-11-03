@@ -19,8 +19,23 @@ namespace InfernoXC
         public string Meaning, ModuleHint;
     }
 
+    public class CrashEvent
+    {
+        public string Key, Category, Source, Title, Detail;
+        public DateTime Time;
+        public int EventId;
+    }
+
+    public class SourceStatus
+    {
+        public string Name; public int Count; public string Error;
+    }
+
     public class CrashReport
     {
+        public List<CrashEvent> Events = new List<CrashEvent>();
+        public List<SourceStatus> Sources = new List<SourceStatus>();
+        public int Duplicates;
         public int Days = 30;
         public List<CrashGroup> Apps = new List<CrashGroup>();
         public int Hangs, Kernel41, Unexpected6008, BugChecks, GpuResets, Whea, DiskErrors;
@@ -65,9 +80,13 @@ namespace InfernoXC
 
         static readonly string[] OverlayProcs = new string[] { "RTSS", "RTSSHooksLoader64", "MSIAfterburner", "Overwolf", "OverwolfBrowser", "Discord", "GameBar", "GameBarFTServer", "Medal", "NVIDIA Share", "nvsphelper64", "Nahimic3", "NahimicService", "SonicStudio3", "aida64" };
 
-        static List<EventData> Query(string log, string xpath, int max)
+        static List<EventData> Query(string log, string xpath, int max) { return Query(null, log, xpath, max, log); }
+
+        static List<EventData> Query(CrashReport rep, string log, string xpath, int max, string label)
         {
             List<EventData> l = new List<EventData>();
+            SourceStatus st = new SourceStatus(); st.Name = label;
+            if (rep != null) rep.Sources.Add(st);
             try
             {
                 EventLogQuery q = new EventLogQuery(log, PathType.LogName, xpath);
@@ -80,6 +99,7 @@ namespace InfernoXC
                         try
                         {
                             EventData d = new EventData();
+                            d.Log = log; d.Record = e.RecordId ?? 0;
                             d.Id = e.Id; d.Time = e.TimeCreated ?? DateTime.MinValue; d.Provider = e.ProviderName;
                             foreach (EventProperty p in e.Properties) d.Props.Add(p.Value == null ? "" : p.Value.ToString());
                             try { d.Text = e.FormatDescription(); } catch { }
@@ -90,13 +110,18 @@ namespace InfernoXC
                     }
                 }
             }
-            catch (Exception ex) { Log.Err("event query " + log, ex); }
+            catch (Exception ex)
+            {
+                Log.Err("event query " + label, ex);
+                st.Error = ex is UnauthorizedAccessException ? "No permission. Run the app as administrator." : ex.Message;
+            }
+            st.Count = l.Count;
             return l;
         }
 
         class EventData
         {
-            public int Id; public DateTime Time; public string Provider, Text;
+            public int Id; public long Record; public string Log; public DateTime Time; public string Provider, Text;
             public List<string> Props = new List<string>();
         }
 
@@ -106,11 +131,12 @@ namespace InfernoXC
             try
             {
                 // application crashes
-                List<EventData> crashes = Query("Application", "*[System[Provider[@Name='Application Error'] and (EventID=1000) and " + Window + "]]", 800);
+                List<EventData> crashes = Query(rep, "Application", "*[System[Provider[@Name='Application Error'] and (EventID=1000) and " + Window + "]]", 800, "Application crashes (event 1000)");
                 Dictionary<string, CrashGroup> g = new Dictionary<string, CrashGroup>(StringComparer.OrdinalIgnoreCase);
                 foreach (EventData e in crashes)
                 {
                     if (e.Props.Count < 8) continue;
+                    AddEvent(rep, e, "App crash", e.Props[0], "Crashed in " + e.Props[3] + ", exception " + e.Props[6]);
                     string app = e.Props[0], mod = e.Props[3], code = (e.Props[6] ?? "").Replace("0x", "").ToLowerInvariant();
                     string key = app + "|" + code + "|" + mod;
                     CrashGroup cg;
@@ -126,30 +152,38 @@ namespace InfernoXC
                 }
                 rep.Apps = g.Values.OrderByDescending(x => x.Count).ThenByDescending(x => x.Last).ToList();
 
-                rep.Hangs = Query("Application", "*[System[Provider[@Name='Application Hang'] and (EventID=1002) and " + Window + "]]", 500).Count;
+                List<EventData> hangs = Query(rep, "Application", "*[System[Provider[@Name='Application Hang'] and (EventID=1002) and " + Window + "]]", 500, "Application hangs (event 1002)");
+                foreach (EventData e in hangs) AddEvent(rep, e, "Hang", e.Props.Count > 0 ? e.Props[0] : "Application", "The program stopped responding and was closed or waited on.");
+                rep.Hangs = hangs.Count;
 
                 // GPU hardware resets reported through Windows Error Reporting
-                foreach (EventData e in Query("Application", "*[System[Provider[@Name='Windows Error Reporting'] and (EventID=1001) and " + Window + "]]", 400))
+                foreach (EventData e in Query(rep, "Application", "*[System[Provider[@Name='Windows Error Reporting'] and (EventID=1001) and " + Window + "]]", 400, "Windows Error Reporting (event 1001)"))
                 {
                     string t = (e.Text ?? "") + " " + string.Join(" ", e.Props.ToArray());
-                    if (t.IndexOf("LiveKernelEvent", StringComparison.OrdinalIgnoreCase) >= 0 && Regex.IsMatch(t, @"\b(141|117|1a8|193)\b", RegexOptions.IgnoreCase)) rep.GpuResets++;
+                    if (t.IndexOf("LiveKernelEvent", StringComparison.OrdinalIgnoreCase) >= 0 && Regex.IsMatch(t, @"\b(141|117|1a8|193)\b", RegexOptions.IgnoreCase)) { rep.GpuResets++; AddEvent(rep, e, "GPU reset", "Graphics driver reset", "Windows recovered the graphics driver after it stopped responding (LiveKernelEvent)."); }
                 }
 
                 // system log
-                foreach (EventData e in Query("System", "*[System[(EventID=41 or EventID=1001 or EventID=6008 or EventID=4101) and " + Window + "]]", 600))
+                foreach (EventData e in Query(rep, "System", "*[System[(EventID=41 or EventID=1001 or EventID=6008 or EventID=4101) and " + Window + "]]", 600, "System: shutdowns, blue screens, display resets"))
                 {
-                    if (e.Id == 41 && (e.Provider ?? "").IndexOf("Kernel-Power", StringComparison.OrdinalIgnoreCase) >= 0) rep.Kernel41++;
-                    else if (e.Id == 6008) rep.Unexpected6008++;
+                    if (e.Id == 41 && (e.Provider ?? "").IndexOf("Kernel-Power", StringComparison.OrdinalIgnoreCase) >= 0) { rep.Kernel41++; AddEvent(rep, e, "Shutdown", "Unexpected power loss or restart", "Kernel-Power 41: the PC restarted without shutting down cleanly."); }
+                    else if (e.Id == 6008) { rep.Unexpected6008++; AddEvent(rep, e, "Shutdown", "Previous shutdown was unexpected", e.Text); }
                     else if (e.Id == 1001 && (e.Provider ?? "").IndexOf("WER-SystemErrorReporting", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         rep.BugChecks++;
+                        AddEvent(rep, e, "Blue screen", "Windows restarted after a blue screen", e.Text);
                         Match m = Regex.Match((e.Text ?? "") + " " + (e.Props.Count > 0 ? e.Props[0] : ""), @"0x[0-9a-fA-F]{8}");
                         if (m.Success && !rep.BugCheckCodes.Contains(m.Value.ToLowerInvariant())) rep.BugCheckCodes.Add(m.Value.ToLowerInvariant());
                     }
-                    else if (e.Id == 4101) rep.GpuResets++;
+                    else if (e.Id == 4101) { rep.GpuResets++; AddEvent(rep, e, "GPU reset", "Display driver stopped responding and recovered", e.Text); }
                 }
-                rep.Whea = Query("System", "*[System[Provider[@Name='Microsoft-Windows-WHEA-Logger'] and " + Window + "]]", 200).Count;
-                rep.DiskErrors = Query("System", "*[System[Provider[@Name='disk'] and (EventID=7 or EventID=11 or EventID=51 or EventID=153) and " + Window + "]]", 200).Count;
+                List<EventData> wh = Query(rep, "System", "*[System[Provider[@Name='Microsoft-Windows-WHEA-Logger'] and " + Window + "]]", 200, "Hardware errors (WHEA)");
+                foreach (EventData e in wh) AddEvent(rep, e, "Hardware", "Hardware error reported by the CPU or bus", e.Text);
+                rep.Whea = wh.Count;
+                List<EventData> dk = Query(rep, "System", "*[System[Provider[@Name='disk'] and (EventID=7 or EventID=11 or EventID=51 or EventID=153) and " + Window + "]]", 200, "Disk errors");
+                foreach (EventData e in dk) AddEvent(rep, e, "Disk", "Disk error (event " + e.Id + ")", e.Text);
+                rep.DiskErrors = dk.Count;
+                rep.Events = rep.Events.OrderByDescending(x => x.Time).ToList();
 
                 try
                 {
@@ -166,6 +200,28 @@ namespace InfernoXC
             catch (Exception ex) { Log.Err(ex); rep.Failed = true; }
             return rep;
         }
+
+        /// <summary>One entry per Windows event record. Records seen twice are counted as duplicates, not listed again.</summary>
+        static void AddEvent(CrashReport rep, EventData e, string cat, string title, string detail)
+        {
+            string key = e.Log + "|" + e.Record + "|" + e.Id + "|" + e.Time.Ticks;
+            foreach (CrashEvent x in rep.Events) { if (x.Key == key) { rep.Duplicates++; return; } }
+            CrashEvent c = new CrashEvent();
+            c.Key = key; c.Category = cat; c.Source = e.Provider ?? e.Log; c.Title = title; c.EventId = e.Id; c.Time = e.Time;
+            string t = (detail ?? "").Trim();
+            if (t.Length > 1500) t = t.Substring(0, 1500) + "...";
+            c.Detail = t;
+            rep.Events.Add(c);
+        }
+
+        public static string EventsCsv(IEnumerable<CrashEvent> list)
+        {
+            StringBuilder sb = new StringBuilder("Time,Category,Source,EventId,Title,Detail\r\n");
+            foreach (CrashEvent c in list)
+                sb.AppendLine(string.Join(",", new string[] { c.Time.ToString("yyyy-MM-dd HH:mm:ss"), Csv(c.Category), Csv(c.Source), c.EventId.ToString(), Csv(c.Title), Csv(c.Detail) }));
+            return sb.ToString();
+        }
+        static string Csv(string s) { s = (s ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " "); return "\"" + s + "\""; }
 
         static string HintFor(string module)
         {
@@ -235,8 +291,15 @@ namespace InfernoXC
         CrashReport _rep;
         bool _loading, _loaded;
         Button _save;
+        StackPanel _evHost;
+        TextBox _search, _detail;
+        int _catIdx, _rangeIdx = 2;
+        static readonly string[] Cats = new string[] { "All types", "App crash", "Hang", "Shutdown", "Blue screen", "GPU reset", "Hardware", "Disk" };
+        static readonly string[] Ranges = new string[] { "Last 24 hours", "Last 7 days", "Last 30 days" };
+        TextBlock _evCount;
+        List<CrashEvent> _shown = new List<CrashEvent>();
 
-        public CrashPage(HardwareInfo hw) : base("Crash Report", "Why your games and apps crash, and what is mismatched in this PC. Read from the last 30 days of Windows event logs.")
+        public CrashPage(HardwareInfo hw) : base("Crash Center", "Why your games and apps crash, and what is mismatched in this PC. Read from the last 30 days of Windows event logs.")
         {
             _hw = hw;
             Grid top = new Grid();
@@ -322,12 +385,87 @@ namespace InfernoXC
             _host.Children.Add(UK.Section("Crashes by app", r.Apps.Count + " distinct problem" + (r.Apps.Count == 1 ? "" : "s"), ca, r.Apps.Count > 0, null));
 
             // overlays
+            // event list
+            StackPanel ev = new StackPanel();
+            WrapPanel fb = new WrapPanel(); fb.Margin = new Thickness(0, 0, 0, 8);
+            _search = new TextBox(); _search.Style = UK.S("Box"); _search.Width = 220; _search.Margin = new Thickness(0, 0, 8, 0);
+            _search.ToolTip = "Search app, source or text";
+            _search.TextChanged += delegate { FillEvents(); };
+            Button catBtn = UK.Cycle("Type: ", Cats, _catIdx, delegate(int i) { _catIdx = i; FillEvents(); });
+            Button rangeBtn = UK.Cycle("Range: ", Ranges, _rangeIdx, delegate(int i) { _rangeIdx = i; FillEvents(); });
+            fb.Children.Add(_search); fb.Children.Add(catBtn); fb.Children.Add(rangeBtn);
+            fb.Children.Add(UK.Btn("Copy list", false, delegate { CopyList(); }));
+            fb.Children.Add(UK.Btn("Export CSV", false, delegate { ExportCsv(); }));
+            ev.Children.Add(fb);
+            _evCount = UK.T("", "Muted"); _evCount.Margin = new Thickness(0, 0, 0, 6);
+            ev.Children.Add(_evCount);
+            _evHost = new StackPanel();
+            ev.Children.Add(_evHost);
+            _detail = new TextBox(); _detail.Style = UK.S("Box"); _detail.IsReadOnly = true; _detail.TextWrapping = TextWrapping.Wrap; _detail.MinHeight = 60; _detail.MaxHeight = 200;
+            _detail.VerticalScrollBarVisibility = ScrollBarVisibility.Auto; _detail.Margin = new Thickness(0, 8, 0, 0);
+            _detail.Text = "Click an event to see its full details here.";
+            ev.Children.Add(_detail);
+            _host.Children.Add(UK.Section("Events", r.Events.Count + " recorded" + (r.Duplicates > 0 ? ", " + r.Duplicates + " duplicate record(s) merged" : ""), ev, false, null));
+            FillEvents();
+
+            // sources
+            StackPanel src = new StackPanel();
+            for (int i = 0; i < r.Sources.Count; i++)
+            {
+                SourceStatus ss = r.Sources[i];
+                src.Children.Add(UK.Row(ss.Name, ss.Error == null ? "Read successfully." : "Could not read: " + ss.Error, UK.Right(ss.Error == null ? ss.Count + " found" : "Error"), null, i == r.Sources.Count - 1));
+            }
+            int bad = r.Sources.Count(x => x.Error != null);
+            _host.Children.Add(UK.Section("Log sources", bad == 0 ? "All " + r.Sources.Count + " sources were read" : bad + " source(s) could not be read", src, bad > 0, null));
+
             if (r.Overlays.Count > 0)
             {
                 StackPanel ov = new StackPanel();
                 ov.Children.Add(UK.T("These programs hook into games and are running now: " + string.Join(", ", r.Overlays.ToArray()) + ". Close them and see if the crashes stop.", "Body"));
                 _host.Children.Add(UK.Section("Overlay software running now", r.Overlays.Count + " found", ov, false, null));
             }
+        }
+
+        void FillEvents()
+        {
+            if (_rep == null || _evHost == null) return;
+            string q = (_search.Text ?? "").Trim();
+            string cat = _catIdx <= 0 ? null : Cats[_catIdx];
+            DateTime from = DateTime.Now.AddDays(_rangeIdx == 0 ? -1 : _rangeIdx == 1 ? -7 : -30);
+            _shown = _rep.Events.Where(e => e.Time >= from && (cat == null || e.Category == cat) &&
+                (q.Length == 0 || (e.Title ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0 || (e.Source ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0 || (e.Detail ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
+            _evHost.Children.Clear();
+            int max = 150;
+            for (int i = 0; i < _shown.Count && i < max; i++)
+            {
+                CrashEvent c = _shown[i];
+                string d = (c.Detail ?? "").Replace("\r", " ").Replace("\n", " ");
+                if (d.Length > 160) d = d.Substring(0, 160) + "...";
+                Border row = UK.Row(c.Title, c.Category + "  -  " + c.Source + (d.Length > 0 ? "\n" + d : ""), UK.Right(c.Time.ToString("MMM d HH:mm")), null, i == _shown.Count - 1 || i == max - 1);
+                row.Cursor = System.Windows.Input.Cursors.Hand;
+                CrashEvent cc = c;
+                row.MouseLeftButtonUp += delegate { _detail.Text = cc.Time.ToString("yyyy-MM-dd HH:mm:ss") + "   " + cc.Category + "   event " + cc.EventId + "   " + cc.Source + "\r\n" + cc.Title + "\r\n\r\n" + cc.Detail; };
+                _evHost.Children.Add(row);
+            }
+            _evCount.Text = _shown.Count == 0 ? "No events match." : _shown.Count > max ? "Showing the newest " + max + " of " + _shown.Count + ". Export to see all." : _shown.Count + " event(s).";
+        }
+
+        void CopyList()
+        {
+            try { Clipboard.SetText(CrashKit.EventsCsv(_shown)); _evCount.Text = _shown.Count + " event(s) copied to the clipboard."; }
+            catch (Exception ex) { _evCount.Text = "Could not copy: " + ex.Message; }
+        }
+
+        void ExportCsv()
+        {
+            try
+            {
+                string f = Path.Combine(Paths.Sub("reports"), "crash-events-" + DateTime.Now.ToString("yyyyMMdd-HHmm") + ".csv");
+                File.WriteAllText(f, CrashKit.EventsCsv(_shown), Encoding.UTF8);
+                _evCount.Text = "Exported " + _shown.Count + " event(s) to " + f;
+                Process.Start("explorer.exe", "/select,\"" + f + "\"");
+            }
+            catch (Exception ex) { _evCount.Text = "Could not export: " + ex.Message; }
         }
 
         void Save()

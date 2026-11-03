@@ -49,6 +49,8 @@ try {
   $bw.Write([uint16]1); $bw.Write([uint16]32); $bw.Write([uint32]$pngBytes.Length); $bw.Write([uint32]22)
   $bw.Write($pngBytes); $bw.Flush()
   [System.IO.File]::WriteAllBytes($ico, $ms.ToArray())
+  $asset = Join-Path $here 'assets'
+  if ((Test-Path (Join-Path $asset 'app.ico')) -and (Test-Path (Join-Path $asset 'app.png'))) { Copy-Item (Join-Path $asset 'app.ico') $ico -Force; Copy-Item (Join-Path $asset 'app.png') $png -Force; L "icon from assets" }
   L "icon ok"
 
   # --- compile ---
@@ -56,7 +58,7 @@ try {
   $csc = Join-Path $fw 'csc.exe'
   if (-not (Test-Path $csc)) { throw "csc.exe not found: $csc" }
   $wpf = Join-Path $fw 'WPF'
-  $asms = 'PresentationFramework', 'PresentationCore', 'WindowsBase', 'System.Xaml', 'System', 'System.Core', 'System.Management', 'System.Windows.Forms', 'System.Drawing', 'System.ServiceProcess', 'System.Web.Extensions', 'Microsoft.CSharp'
+  $asms = 'PresentationFramework', 'PresentationCore', 'WindowsBase', 'System.Xaml', 'System', 'System.Core', 'System.Management', 'System.Windows.Forms', 'System.Drawing', 'System.ServiceProcess', 'System.Web.Extensions', 'Microsoft.CSharp', 'Microsoft.VisualBasic'
   $refs = foreach ($a in $asms) { if (Test-Path (Join-Path $wpf "$a.dll")) { '/r:' + (Join-Path $wpf "$a.dll") } else { "/r:$a.dll" } }
   $exe = Join-Path $out 'IXC-PC-Ready.exe'
   Get-Process -Name 'IXC-PC-Ready' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -82,6 +84,12 @@ try {
     $p = Start-Process -FilePath $exe -ArgumentList '--selftest' -PassThru
     if (-not $p.WaitForExit(330000)) { try { $p.Kill() } catch {} ; L "selftest TIMEOUT (killed)" } else { L ("selftest exit " + $p.ExitCode) }
     if (Test-Path (Join-Path $st 'selftest.txt')) { Copy-Item (Join-Path $st 'selftest.txt') (Join-Path $here 'selftest-report.txt') -Force; L "selftest report copied" }
+    L "running functional test..."
+    $ft = Join-Path $out 'functest.txt'
+    if (Test-Path $ft) { Remove-Item $ft -Force }
+    $p2 = Start-Process -FilePath $exe -ArgumentList '--functest' -PassThru
+    if (-not $p2.WaitForExit(240000)) { try { $p2.Kill() } catch {} ; L "functest TIMEOUT (killed)" } else { L ("functest exit " + $p2.ExitCode) }
+    if (Test-Path $ft) { Copy-Item $ft (Join-Path $here 'functest-report.txt') -Force; L "functest report copied" }
     $se = Join-Path $out 'startup-error.txt'
     if (Test-Path $se) { Copy-Item $se (Join-Path $here 'startup-error.txt') -Force; L "STARTUP ERROR file found" }
   }

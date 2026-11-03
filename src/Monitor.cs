@@ -31,6 +31,9 @@ namespace InfernoXC
     {
         public double Cpu, Gpu, RamUsedMB, RamTotalMB, VramUsedMB;
         public bool GpuOk;
+        public string GpuSource = "", GpuReason = "";
+        public long GpuLuid;
+        public SensorSnapshot Sensors = new SensorSnapshot();
         public List<ProcRow> Rows = new List<ProcRow>();
     }
 
@@ -56,7 +59,7 @@ namespace InfernoXC
         };
 
         static HashSet<string> _custom;
-        static bool IsGameName(string n)
+        public static bool IsGameName(string n)
         {
             if (KnownGames.Contains(n)) return true;
             if (_custom == null)
@@ -74,7 +77,15 @@ namespace InfernoXC
         DateTime _prevT = DateTime.MinValue;
         PerformanceCounter _cpuTotal;
         Dictionary<string, CounterSample> _prevGpu = new Dictionary<string, CounterSample>();
-        bool _gpuBroken;
+        DateTime _gpuRetryAt = DateTime.MinValue;
+        int _gpuFails;
+        string _gpuReason = "";
+        long _primaryLuid;
+        SensorHub _hub = new SensorHub();
+        Pdh.Query _pdhGpu;
+        int _pdhGpuIdx = -1;
+        public string GpuSourceNow = "";
+        static readonly Regex LuidRx = new Regex(@"luid_0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)", RegexOptions.Compiled);
         static readonly Regex GpuInst = new Regex(@"pid_(\d+)_.*?engtype_(.+)$", RegexOptions.Compiled);
         static readonly Regex PidInst = new Regex(@"pid_(\d+)_", RegexOptions.Compiled);
 
@@ -103,22 +114,50 @@ namespace InfernoXC
                 s.RamUsedMB = (m.ullTotalPhys - m.ullAvailPhys) / 1048576.0;
             }
 
-            // GPU counters
+            // GPU counters: .NET counters first, then language-independent PDH, then the vendor library.
+            // A failure is never permanent: it is retried every 15 seconds and the reason is kept.
             Dictionary<int, double> gpuPid = new Dictionary<int, double>();
             Dictionary<int, double> vramPid = new Dictionary<int, double>();
-            if (!_gpuBroken)
+            if (DateTime.UtcNow >= _gpuRetryAt)
             {
-                try
-                {
-                    ReadGpu(s, gpuPid, vramPid);
-                    s.GpuOk = true;
-                }
+                bool ok = false;
+                try { ReadGpu(s, gpuPid, vramPid); ok = true; s.GpuSource = "Windows GPU counters"; }
                 catch (Exception ex)
                 {
-                    _gpuBroken = true;
+                    _gpuReason = ".NET counters: " + ex.Message;
                     Log.Err("GPU counters", ex);
+                    try { ok = ReadGpuPdh(s, gpuPid, vramPid); if (ok) s.GpuSource = "Windows GPU counters (PDH)"; else _gpuReason += " | PDH: no GPU Engine counters"; }
+                    catch (Exception ex2) { _gpuReason += " | PDH: " + ex2.Message; }
+                }
+                if (ok) { s.GpuOk = true; _gpuFails = 0; _gpuReason = ""; GpuSourceNow = s.GpuSource; }
+                else { _gpuFails++; _gpuRetryAt = DateTime.UtcNow.AddSeconds(15); GpuSourceNow = ""; }
+            }
+            else
+            {
+                // between retries keep using the working source if there is one
+                if (GpuSourceNow.Length > 0)
+                {
+                    try { ReadGpu(s, gpuPid, vramPid); s.GpuOk = true; s.GpuSource = GpuSourceNow; }
+                    catch { _gpuRetryAt = DateTime.MinValue; }
                 }
             }
+            s.GpuReason = _gpuReason;
+
+            // sensors (temperatures, NVIDIA fallback, disk activity)
+            try
+            {
+                s.Sensors = _hub.Poll(_primaryLuid);
+                s.GpuLuid = _primaryLuid;
+                if (!s.GpuOk && s.Sensors.GpuUtil.Ok)
+                {
+                    s.Gpu = s.Sensors.GpuUtil.Value; s.GpuOk = true; s.GpuSource = s.Sensors.GpuUtil.Source;
+                    foreach (NvGpu g in s.Sensors.Nvidia) if (g.VramUsedMB > s.VramUsedMB) s.VramUsedMB = g.VramUsedMB;
+                }
+                if (s.GpuOk && s.VramUsedMB <= 0)
+                    foreach (NvGpu g in s.Sensors.Nvidia) if (g.VramUsedMB > s.VramUsedMB) s.VramUsedMB = g.VramUsedMB;
+                if (!s.GpuOk) s.GpuReason = (string.IsNullOrEmpty(_gpuReason) ? "No GPU counters" : _gpuReason) + ". Retrying automatically.";
+            }
+            catch (Exception ex) { Log.Err("sensors", ex); }
 
             Dictionary<string, ProcRow> byName = new Dictionary<string, ProcRow>(StringComparer.OrdinalIgnoreCase);
             Dictionary<int, TimeSpan> curCpu = new Dictionary<int, TimeSpan>();
@@ -178,6 +217,7 @@ namespace InfernoXC
         {
             PerformanceCounterCategory eng = new PerformanceCounterCategory("GPU Engine");
             InstanceDataCollectionCollection all = eng.ReadCategory();
+            if (!all.Contains("Utilization Percentage")) throw new InvalidOperationException("the GPU Engine category has no Utilization Percentage counter (needs Windows 10 1709 or newer with a WDDM 2.x driver)");
             InstanceDataCollection util = all["Utilization Percentage"];
             Dictionary<string, CounterSample> cur = new Dictionary<string, CounterSample>();
             Dictionary<int, Dictionary<string, double>> perPidType = new Dictionary<int, Dictionary<string, double>>();
@@ -223,10 +263,53 @@ namespace InfernoXC
                 PerformanceCounterCategory am = new PerformanceCounterCategory("GPU Adapter Memory");
                 InstanceDataCollection ded = am.ReadCategory()["Dedicated Usage"];
                 double best = 0;
-                foreach (InstanceData d in ded.Values) best = Math.Max(best, d.Sample.RawValue / 1048576.0);
+                foreach (InstanceData d in ded.Values)
+                {
+                    double mb = d.Sample.RawValue / 1048576.0;
+                    if (mb >= best)
+                    {
+                        best = mb;
+                        Match lm = LuidRx.Match(d.InstanceName);
+                        if (lm.Success) { try { _primaryLuid = (Convert.ToInt64(lm.Groups[1].Value, 16) << 32) | Convert.ToInt64(lm.Groups[2].Value, 16); } catch { } }
+                    }
+                }
                 s.VramUsedMB = best;
             }
             catch { }
+        }
+
+        /// <summary>Language-independent fallback for the GPU Engine counters.</summary>
+        bool ReadGpuPdh(SystemSample s, Dictionary<int, double> gpuPid, Dictionary<int, double> vramPid)
+        {
+            if (_pdhGpu == null)
+            {
+                Pdh.Query q = new Pdh.Query();
+                int i = q.Add("\\GPU Engine(*)\\Utilization Percentage");
+                if (i < 0) { q.Dispose(); return false; }
+                _pdhGpu = q; _pdhGpuIdx = i;
+                q.Collect();
+                System.Threading.Thread.Sleep(250);
+            }
+            if (!_pdhGpu.Collect()) { _pdhGpu.Dispose(); _pdhGpu = null; return false; }
+            Dictionary<string, double> vals = _pdhGpu.Array(_pdhGpuIdx);
+            Dictionary<int, Dictionary<string, double>> perPidType = new Dictionary<int, Dictionary<string, double>>();
+            Dictionary<string, double> typeTotal = new Dictionary<string, double>();
+            foreach (KeyValuePair<string, double> kv in vals)
+            {
+                if (kv.Value <= 0) continue;
+                Match mt = GpuInst.Match(kv.Key);
+                if (!mt.Success) continue;
+                int pid = int.Parse(mt.Groups[1].Value);
+                string type = mt.Groups[2].Value;
+                Dictionary<string, double> pt;
+                if (!perPidType.TryGetValue(pid, out pt)) { pt = new Dictionary<string, double>(); perPidType[pid] = pt; }
+                double cv; pt.TryGetValue(type, out cv); pt[type] = cv + kv.Value;
+                double tv; typeTotal.TryGetValue(type, out tv); typeTotal[type] = tv + kv.Value;
+            }
+            foreach (KeyValuePair<int, Dictionary<string, double>> kv in perPidType)
+                gpuPid[kv.Key] = Math.Min(100, kv.Value.Values.Max());
+            s.Gpu = typeTotal.Count == 0 ? 0 : Math.Min(100, typeTotal.Values.Max());
+            return true;
         }
     }
 }

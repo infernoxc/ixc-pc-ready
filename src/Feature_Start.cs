@@ -355,7 +355,14 @@ namespace InfernoXC
                 string detail = string.IsNullOrEmpty(it.Reason) ? (it.Command ?? "") : it.Reason;
                 if (detail.Length > 110) detail = detail.Substring(0, 107) + "...";
                 string right = it.Protected ? "locked" : it.Source;
-                sp.Children.Add(UK.Row(it.Name, detail, UK.Right(right ?? ""), sw, i == items.Count - 1));
+                Border srow = UK.Row(it.Name, detail, UK.Right(right ?? ""), sw, i == items.Count - 1);
+                StackPanel chips = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+                if (it.Protected) chips.Children.Add(UK.Chip("PROTECTED - KEEP ON", "Bad"));
+                else if (title.StartsWith("Optional Windows")) chips.Children.Add(UK.Chip("SAFE TO SET MANUAL", "Good"));
+                else chips.Children.Add(UK.Chip("CHECK WHAT IT IS FIRST", "Warn"));
+                chips.Children.Add(UK.Chip(it.Enabled ? "RUNS AT START" : "OFF AT START", it.Enabled ? "Info" : "Good"));
+                ((StackPanel)((Grid)srow.Child).Children[0]).Children.Add(chips);
+                sp.Children.Add(srow);
             }
             return UK.Section(title, items.Count + " item" + (items.Count == 1 ? "" : "s") + "  -  " + sub, sp, open, null);
         }

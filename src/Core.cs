@@ -11,7 +11,7 @@ namespace InfernoXC
     {
         public const string Name = "IXC PC Ready";
         public const string Maker = "InFerNoxC";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
         public const string Tagline = "Performance toolkit for Windows gamers";
         public const string RepoUrl = "https://github.com/infernoxc/ixc-pc-ready";
     }

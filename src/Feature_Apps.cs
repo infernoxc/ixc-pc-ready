@@ -124,6 +124,9 @@ namespace InfernoXC
         bool _loaded, _loading;
         SystemSample _last;
         ProcRow _dummy;
+        StackPanel _leftHost;
+        List<LeftoverItem> _left;
+        AppRow _leftApp;
 
         public AppsPage() : base("Installed Apps", "Everything installed on this PC, what it takes on disk, and what it is using right now.")
         {
@@ -160,7 +163,10 @@ namespace InfernoXC
             StackPanel btns = new StackPanel { Orientation = Orientation.Horizontal };
             btns.Children.Add(UK.Btn("Open folder", false, delegate { OpenFolder(); }));
             btns.Children.Add(UK.Btn("Uninstall...", false, delegate { DoUninstall(); }));
+            btns.Children.Add(UK.Btn("Scan leftovers", false, delegate { ScanLeftovers(); }));
             Body.Children.Add(btns);
+            _leftHost = new StackPanel();
+            Body.Children.Add(_leftHost);
             _msg = UK.T("", "Muted");
             _msg.Margin = new Thickness(0, 10, 0, 0);
             Body.Children.Add(_msg);
@@ -254,12 +260,72 @@ namespace InfernoXC
             catch (Exception ex) { _msg.Text = ex.Message; }
         }
 
+        void ScanLeftovers()
+        {
+            AppRow a = Sel();
+            if (a == null) return;
+            _leftHost.Children.Clear();
+            _msg.Text = "Scanning for leftovers of " + a.Name + "...";
+            AppRow app = a;
+            UK.Bg(delegate
+            {
+                bool still = Leftovers.StillInstalled(app);
+                List<LeftoverItem> l = still ? new List<LeftoverItem>() : Leftovers.Scan(app);
+                return new object[] { still, l };
+            }, delegate(object o)
+            {
+                object[] r = (object[])o;
+                bool still = (bool)r[0];
+                _left = (List<LeftoverItem>)r[1]; _leftApp = app;
+                if (still) { _msg.Text = app.Name + " is still installed. Uninstall it first, then scan for leftovers."; return; }
+                ShowLeftovers();
+            });
+        }
+
+        void ShowLeftovers()
+        {
+            _leftHost.Children.Clear();
+            if (_left == null || _left.Count == 0) { _msg.Text = "No leftovers found for " + _leftApp.Name + ". The uninstaller cleaned up after itself."; return; }
+            StackPanel sp = new StackPanel();
+            for (int i = 0; i < _left.Count; i++)
+            {
+                LeftoverItem it = _left[i];
+                System.Windows.Controls.Primitives.ToggleButton sw = UK.Sw(it.Selected);
+                sw.Click += delegate { it.Selected = sw.IsChecked == true; };
+                sp.Children.Add(UK.Row(it.Kind + ": " + it.Path, it.Why, UK.Right(it.Size > 0 ? Util.Bytes(it.Size) : ""), sw, i == _left.Count - 1));
+            }
+            StackPanel wrap = new StackPanel();
+            wrap.Children.Add(sp);
+            TextBlock note = UK.T("Registry keys are exported to a .reg backup before they are deleted. Folders and shortcuts go to the Recycle Bin, so everything can be restored. Only exact matches for the app name are listed, never a whole publisher folder.", "Muted");
+            note.Margin = new Thickness(0, 10, 0, 8); wrap.Children.Add(note);
+            Button rm = UK.Btn("Remove selected", true, delegate { RemoveLeftovers(); });
+            wrap.Children.Add(rm);
+            _leftHost.Children.Add(UK.Section("Leftovers of " + _leftApp.Name, _left.Count + " item" + (_left.Count == 1 ? "" : "s") + " found", wrap, true, null));
+            _msg.Text = _left.Count + " leftover" + (_left.Count == 1 ? "" : "s") + " found. Untick anything you want to keep, then press Remove selected.";
+        }
+
+        void RemoveLeftovers()
+        {
+            int sel = _left.Count(x => x.Selected);
+            if (sel == 0) { _msg.Text = "Nothing is ticked."; return; }
+            if (Dlg.Show("Remove " + sel + " leftover item" + (sel == 1 ? "" : "s") + " of " + _leftApp.Name + "?\n\nRegistry keys are backed up first and files go to the Recycle Bin.", Brand.Name, MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            AppRow app = _leftApp; List<LeftoverItem> items = _left;
+            _msg.Text = "Removing...";
+            UK.Bg(delegate { int ok, failed; string dir = Leftovers.Remove(app, items, out ok, out failed); return new object[] { ok, failed, dir }; }, delegate(object o)
+            {
+                object[] r = (object[])o;
+                _msg.Text = "Removed " + r[0] + " item(s)" + ((int)r[1] > 0 ? ", " + r[1] + " could not be removed (see the log)" : "") + ". Backup and list: " + r[2];
+                _leftHost.Children.Clear();
+                _loaded = false;
+            });
+        }
+
         void DoUninstall()
         {
             AppRow a = Sel();
             if (a == null) return;
             if (string.IsNullOrEmpty(a.Uninstall)) { _msg.Text = a.Name + " has no uninstaller registered" + (a.Launcher != null ? " - uninstall games from " + a.Launcher + "." : "."); return; }
-            MessageBoxResult r = MessageBox.Show("Uninstall " + a.Name + "?\n\nThe app's own uninstaller will open.", Brand.Name, MessageBoxButton.YesNo, MessageBoxImage.Question);
+            MessageBoxResult r = Dlg.Show("Uninstall " + a.Name + "?\n\nThe app's own uninstaller will open.", Brand.Name, MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (r != MessageBoxResult.Yes) return;
             try
             {
@@ -267,7 +333,7 @@ namespace InfernoXC
                 psi.UseShellExecute = false; psi.CreateNoWindow = true;
                 Process.Start(psi);
                 Log.Info("Uninstall launched: " + a.Name);
-                _msg.Text = "Uninstaller started for " + a.Name + ". Refresh the list afterwards by switching tabs.";
+                _msg.Text = "Uninstaller started for " + a.Name + ". When it has finished, select the same entry and press Scan leftovers to find files and settings it left behind.";
                 _loaded = false;
             }
             catch (Exception ex) { _msg.Text = "Could not start uninstaller: " + ex.Message; }

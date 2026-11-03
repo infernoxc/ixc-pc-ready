@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace InfernoXC
 {
@@ -34,6 +35,26 @@ namespace InfernoXC
                 return Marshal.GetLastWin32Error() == 0;
             }
             finally { CloseHandle(tok); }
+        }
+
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder sb, ref int size);
+
+        /// <summary>Full path of a running process without loading its module list (fast). Null when it cannot be read.</summary>
+        public static string ProcPath(int pid)
+        {
+            IntPtr h = OpenProcess(0x1000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h == IntPtr.Zero) return null;
+            try
+            {
+                StringBuilder sb = new StringBuilder(1024);
+                int n = sb.Capacity;
+                return QueryFullProcessImageName(h, 0, sb, ref n) ? sb.ToString() : null;
+            }
+            finally { CloseHandle(h); }
         }
 
         /// <summary>cmd: 2 = empty working sets, 3 = flush modified list, 4 = purge standby, 5 = purge low-priority standby.</summary>
