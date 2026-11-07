@@ -56,7 +56,8 @@ namespace InfernoXC
         // Names that are never touched: anti-cheat, security and core Windows.
         static readonly HashSet<string> Protected = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "vgc.exe", "vgtray.exe", "beservice.exe", "bedaisy.exe", "easyanticheat.exe", "easyanticheat_eos.exe", "easyanticheat_launcher.exe", "faceit.exe", "esea.exe",
+            "vgc.exe", "vgtray.exe", "beservice.exe", "beservice_x64.exe", "bedaisy.exe", "beclient.exe", "beclient_x64.exe", "easyanticheat.exe", "easyanticheat_eos.exe", "easyanticheat_launcher.exe", "faceit.exe", "esea.exe",
+            "tslgame_be.exe", "tslgame_zk.exe", "tslgame_eac.exe",   // PUBG: BattlEye launcher and PUBG's own anti-cheat
             "system", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "svchost.exe", "dwm.exe", "msmpeng.exe", "nissrv.exe",
             "securityhealthservice.exe", "explorer.exe", "taskmgr.exe", "audiodg.exe", "vanguard.exe"
         };

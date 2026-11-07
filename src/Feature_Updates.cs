@@ -228,6 +228,24 @@ namespace InfernoXC
             return forced > 0 ? "closed (" + forced + " had to be forced)" : "closed";
         }
 
+        /// <summary>winget 0x8A150056: the installer cannot run from an administrator context (Spotify and other per-user apps).</summary>
+        public const int ErrUserOnly = unchecked((int)0x8A150056);
+        public static bool IsUserOnly(int code, string lowOutput)
+        {
+            return code == ErrUserOnly || (lowOutput ?? "").Contains("cannot be run from an administrator context");
+        }
+        const string UserOnlyKey = "upd_user_only";
+        public static bool KnownUserOnly(string id)
+        {
+            return Settings.Get(UserOnlyKey, "").Split(',').Any(x => x.Equals(id, StringComparison.OrdinalIgnoreCase));
+        }
+        static void RememberUserOnly(string id)
+        {
+            if (KnownUserOnly(id)) return;
+            string cur = Settings.Get(UserOnlyKey, "");
+            Settings.Set(UserOnlyKey, cur.Length == 0 ? id : cur + "," + id);
+        }
+
         /// <summary>Turns winget's output and exit code into a plain reason. Returns null when the update worked.</summary>
         public static string Explain(int code, string output, bool timedOut)
         {
@@ -239,7 +257,8 @@ namespace InfernoXC
             if (code == 0 || inner == 3010 || inner == 1641 || low.Contains("successfully installed")) return null;
             string hex = "0x" + ((uint)code).ToString("X8");
             string why;
-            if (low.Contains("no installed package found") || low.Contains("no applicable upgrade") || low.Contains("no newer package")) why = "winget cannot match the copy on this PC to the package it knows (it was installed another way, or it is a different edition). Update it inside the app, or reinstall it once through winget.";
+            if (IsUserOnly(code, low)) why = "This app only installs for your own Windows account, and its installer refuses to run from an administrator program like this one. Open the app and update it from inside (Spotify updates itself), or run 'winget upgrade' in a normal, non-admin window. It is skipped in Update all from now on.";
+            else if (low.Contains("no installed package found") || low.Contains("no applicable upgrade") || low.Contains("no newer package")) why = "winget cannot match the copy on this PC to the package it knows (it was installed another way, or it is a different edition). Update it inside the app, or reinstall it once through winget.";
             else if (low.Contains("hash") && (low.Contains("does not match") || low.Contains("mismatch"))) why = "The downloaded installer did not match the published checksum, so winget refused to run it. The publisher may have just replaced the file. Try again later.";
             else if (low.Contains("failed in attempting to update the source") || low.Contains("unable to connect") || low.Contains("download failed") || low.Contains("0x80072ee7") || low.Contains("0x80072efd")) why = "winget could not reach its servers or the download site. Check the internet connection, a VPN or a firewall, then try again.";
             else if (low.Contains("does not support the installation") || low.Contains("no applicable installer")) why = "This package has no installer for this PC (architecture, Windows version or install scope).";
@@ -259,6 +278,12 @@ namespace InfernoXC
         public static string UpdateLive(AppUpdate a, Action<string> line)
         {
             if (!IdOk.IsMatch(a.Id)) return "Unexpected package id.";
+            if (KnownUserOnly(a.Id))
+            {
+                string skip = "Skipped: " + a.Name + " only updates from your own (non-admin) account. Open it and let it update itself.";
+                if (line != null) line(skip);
+                return skip;
+            }
             string log = Path.Combine(Paths.Sub("scripts"), "winget-" + Regex.Replace(a.Id, @"[^A-Za-z0-9.]", "_") + ".log");
             string args = "upgrade --id \"" + a.Id + "\" --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --log \"" + log + "\"";
             string output; bool timedOut;
@@ -268,6 +293,7 @@ namespace InfernoXC
             string reason = Explain(code, output, timedOut);
             try { File.WriteAllText(LogFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + a.Name + " (" + a.Id + ")  exit " + code + "\r\n" + output + "\r\n" + (reason ?? "OK") + "\r\nwinget log: " + log, Encoding.UTF8); } catch { }
             if (reason == null) { Log.Info("Updated " + a.Name + " to " + a.Available + " (winget)"); TuneKit.Record("Updated app " + a.Name + " to " + a.Available); return null; }
+            if (IsUserOnly(code, (output ?? "").ToLowerInvariant())) RememberUserOnly(a.Id);
             Log.Info("Update of " + a.Name + " failed: " + reason.Replace("\n", " | "));
             return reason + "\nFull log: " + log;
         }
