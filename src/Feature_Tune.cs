@@ -415,11 +415,20 @@ namespace InfernoXC
                         bool want = sw.IsChecked == true;
                         try
                         {
-                            string before = SafeCur(t);
-                            if (want) t.On(); else t.Off();
-                            Log.Info("Tweak " + t.Id + " -> " + (want ? "applied" : "reverted"));
-                            TuneKit.Record((want ? "Applied " : "Reverted ") + t.Title + "  [" + before + " -> " + SafeCur(t) + "]" + (t.Restart ? "  (needs sign-out or restart)" : ""));
-                            _msg.Text = (want ? "Applied: " : "Reverted: ") + t.Title + ".";
+                            if (want)
+                            {
+                                string before = SafeCur(t);
+                                t.On();
+                                Log.Info("Tweak " + t.Id + " -> applied");
+                                TuneKit.Record("Applied " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]" + (t.Restart ? "  (needs sign-out or restart)" : ""));
+                                _msg.Text = "Applied: " + t.Title + ".";
+                            }
+                            else if (RevertOne(t, ""))
+                            {
+                                Log.Info("Tweak " + t.Id + " -> reverted");
+                                _msg.Text = "Reverted: " + t.Title + ".";
+                            }
+                            else _msg.Text = t.Title + NotOursMsg;
                         }
                         catch (Exception ex)
                         {
@@ -489,7 +498,7 @@ namespace InfernoXC
             }
             foreach (Tweak t in off)
             {
-                try { string before = SafeCur(t); t.Off(); changed++; TuneKit.Record("Reverted " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]  (profile " + lvl.Name + ")"); }
+                try { if (RevertOne(t, "profile " + lvl.Name)) changed++; }
                 catch (Exception ex) { failed.Add(t.Title + " (" + ex.Message + ")"); Log.Err(ex); }
             }
             Refresh();
@@ -497,6 +506,23 @@ namespace InfernoXC
         }
 
         static bool SafeOn(Tweak t) { try { return t.IsOn(); } catch { return false; } }
+
+        /// <summary>True when this app saved the original value, so a revert can actually put it back.</summary>
+        static bool CanRevert(Tweak t) { try { return t.AppSet == null || t.AppSet(); } catch { return false; } }
+
+        /// <summary>Reverts one tweak. Returns true only when something was really put back; a setting this app
+        /// never changed has no saved original and is left as it is (and is not logged as "Reverted").</summary>
+        static bool RevertOne(Tweak t, string tag)
+        {
+            if (!CanRevert(t)) { Log.Info("Tweak " + t.Id + " left as is: not set by this app, no original saved"); return false; }
+            string before = SafeCur(t);
+            t.Off();
+            string after = SafeCur(t);
+            TuneKit.Record("Reverted " + t.Title + "  [" + before + " -> " + after + "]" + (tag.Length > 0 ? "  (" + tag + ")" : "") + (t.Restart ? "  (needs sign-out or restart)" : ""));
+            return true;
+        }
+
+        const string NotOursMsg = " was already like this before IXC PC Ready, so there is no original to put back. Change it in Windows Settings if you want it different.";
 
         public override void Shown() { Refresh(); }
 
@@ -557,19 +583,21 @@ namespace InfernoXC
         void SetGroup(List<Tweak> g, bool apply)
         {
             if (apply && Dlg.Show("Turn on all " + g.Count + " settings in this group?\n\nOriginal values are saved and every switch can be turned back off.", Brand.Name, MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-            int fail = 0;
+            int fail = 0, done = 0, notOurs = 0;
             foreach (Tweak t in g)
             {
                 if (t.Skip != null) continue;
                 try
                 {
                     bool on = t.IsOn(); string before = SafeCur(t);
-                    if (apply && !on) { t.On(); TuneKit.Record("Applied " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]  (group)"); }
-                    else if (!apply && on) { t.Off(); TuneKit.Record("Reverted " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]  (group)"); }
+                    if (apply && !on) { t.On(); done++; TuneKit.Record("Applied " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]  (group)"); }
+                    else if (!apply && on) { if (RevertOne(t, "group")) done++; else notOurs++; }
                 }
                 catch (Exception ex) { fail++; Log.Err(ex); }
             }
-            _msg.Text = (apply ? "Turned on the group" : "Turned off the group") + (fail > 0 ? " (" + fail + " could not be changed)" : "") + ".";
+            _msg.Text = (apply ? "Turned on " + done + " setting" + (done == 1 ? "" : "s") + " in the group" : "Put back " + done + " setting" + (done == 1 ? "" : "s"))
+                + (notOurs > 0 ? ". " + notOurs + " left as is because they were already set before IXC PC Ready (no original to put back)" : "")
+                + (fail > 0 ? ". " + fail + " could not be changed" : "") + ".";
             Refresh();
         }
 
@@ -580,7 +608,7 @@ namespace InfernoXC
                 MessageBoxResult r = Dlg.Show("Apply every recommended setting?\n\nOriginal values are saved, so Revert all puts everything back.", Brand.Name, MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (r != MessageBoxResult.Yes) return;
             }
-            int fail = 0;
+            int fail = 0, notOurs = 0;
             foreach (Tweak t in _tweaks)
             {
                 if (t.Skip != null || (apply && t.Optional)) continue;
@@ -589,11 +617,13 @@ namespace InfernoXC
                     bool on = t.IsOn();
                     string before = SafeCur(t);
                     if (apply && !on) { t.On(); TuneKit.Record("Applied " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]  (apply all)"); }
-                    else if (!apply && on) { t.Off(); TuneKit.Record("Reverted " + t.Title + "  [" + before + " -> " + SafeCur(t) + "]  (revert all)"); }
+                    else if (!apply && on && !RevertOne(t, "revert all")) notOurs++;
                 }
                 catch (Exception ex) { fail++; Log.Err(ex); }
             }
-            _msg.Text = (apply ? "Applied all recommended settings" : "Reverted all settings") + (fail > 0 ? " (" + fail + " could not be changed)" : "") + ". Some changes apply after a restart or sign-out.";
+            _msg.Text = (apply ? "Applied all recommended settings" : "Put back every setting this app changed")
+                + (!apply && notOurs > 0 ? " (" + notOurs + " left as is: they were already set before IXC PC Ready)" : "")
+                + (fail > 0 ? " (" + fail + " could not be changed)" : "") + ". Some changes apply after a restart or sign-out.";
             Refresh();
         }
     }

@@ -310,8 +310,10 @@ namespace InfernoXC
 
         static long RamPurge(CleanJob job)
         {
+            // Open apps are never emptied out of RAM (that makes them stutter while they page back in),
+            // and nothing is touched while a game or OBS is running.
+            if (GameMode.LiveCount > 0 || GameMode.ObsRunning()) { job.Note("Free memory now: skipped because a game or OBS is running"); return 0; }
             double before = GameMode.AvailMB();
-            Native.MemoryCommand(2);
             Native.MemoryCommand(3);
             Native.MemoryCommand(4);
             return (long)(Math.Max(0, GameMode.AvailMB() - before) * 1048576);   // memory, not disk: not added to space recovered
@@ -460,7 +462,7 @@ namespace InfernoXC
             Add(l, "Windows", "events", "Event logs", "Clears the Windows Event Viewer logs. This also erases the history the Crash Center reads.", "High", false, false, false,
                 j => EventLogSize(j), ClearEventLogs);
 
-            Add(l, "Memory and drive", "ram", "Free memory now", "Empties standby and idle memory so apps start with clean RAM. Nothing is closed. This is memory, not disk space.", "Low", true, false, false,
+            Add(l, "Memory and drive", "ram", "Free memory now", "Releases Windows' cached (standby) memory. Open apps keep their memory and nothing is closed. Skipped while a game or OBS is running. This is memory, not disk space.", "Low", true, false, false,
                 j => -1, RamPurge);
             Add(l, "Memory and drive", "trim", "SSD TRIM", "Tells your SSDs which blocks are free so they keep their speed. Hard disks are skipped.", "Low", true, true, false,
                 j => -1, Trim);

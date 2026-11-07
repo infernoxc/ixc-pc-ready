@@ -161,7 +161,7 @@ namespace InfernoXC
         public static bool Active;
         public static DateTime Since;
         public static string Summary = "";
-        public static string LastReport = Settings.Get("gm_last", "");
+        public static string LastReport = Settings.Get("gm_last", "").Replace("\\n", "\r\n");
         public static event Action Changed;
         public static event Action FeedChanged;
 
@@ -199,7 +199,7 @@ namespace InfernoXC
                 CloseApps = true, PauseSvcs = true, Purge = true, Gpu = true, LowerBg = true, Quiet = true, Boost = "High" },
             new GmMode { Id = "streaming", Title = "Streaming", Detail = "Keeps OBS and Discord safe: the game gets High priority, OBS gets Above Normal so the encoder is not starved, only light services are paused, nothing is purged mid-stream.",
                 CloseApps = true, LightSvcs = true, Gpu = true, LowerBg = true, Quiet = true, ObsUp = true, Boost = "High" },
-            new GmMode { Id = "heavy", Title = "Heavy games", Detail = "Competitive plus more: closes extra background apps (Widgets, Phone Link, chat apps), pauses every optional service including Windows Update, and clears memory twice. For big open-world games on 16 GB.",
+            new GmMode { Id = "heavy", Title = "Heavy games", Detail = "Competitive plus more: closes extra background apps (Widgets, Phone Link, chat apps), pauses every optional service including Windows Update, and releases cached memory when RAM is low. For big open-world games on 16 GB.",
                 CloseApps = true, ExtraApps = true, PauseSvcs = true, AllSvcs = true, Purge = true, Gpu = true, LowerBg = true, Quiet = true, Boost = "High" },
             new GmMode { Id = "silent", Title = "Silent / battery", Detail = "Gentle: nothing is closed or boosted. Light services paused, launchers and browsers lowered, notifications silenced. Good on a laptop or when you want less heat and fan noise.",
                 LightSvcs = true, LowerBg = true, Quiet = true },
@@ -253,13 +253,16 @@ namespace InfernoXC
             if (apps.Count > 0) l.Add("Close: " + string.Join(", ", apps.ToArray()) + "  (only the ones that are running)");
             List<string> sv = SvcsFor(m).Where(SvcExists).ToList();
             if (sv.Count > 0) l.Add("Pause services: " + string.Join(", ", sv.ToArray()) + "  (started again when it ends)");
-            if (m.Purge) l.Add("Empty standby and idle memory so the game starts with free RAM");
+            if (m.Purge) l.Add("Release cached memory only if free RAM is under 2 GB (skipped while OBS is running; open apps are never pushed out of RAM)");
             if (m.Boost == "High") l.Add("Set the game's CPU priority to High (the game only, never anti-cheat)");
             if (m.ObsUp) l.Add("Set OBS to Above Normal priority");
             if (m.Gpu) l.Add("Set the game's Windows graphics preference to High performance");
             if (m.LowerBg) l.Add("Lower Steam/Riot/Epic helpers and browsers to Below Normal priority");
             if (m.Quiet) l.Add("Turn app notification pop-ups off, back on afterwards");
-            if (l.Count == 0) l.Add("Nothing will be changed.");
+            if ((m.Id == "competitive" || m.Id == "heavy") && Settings.GetBool("gm_obs_stream", true)) l.Add("If OBS is open: switch to Streaming mode instead");
+            if (Settings.GetBool("gm_lasso_defer", true)) l.Add("If Process Lasso is running: leave all CPU priorities to it");
+            l.Add("Check RAM before the game and name the biggest apps if more than " + Util.MB(RamWarnUsedMB) + " is in use");
+            l.Add("Log RAM every 30 seconds and add it to the session report");
             return l;
         }
 
@@ -391,11 +394,30 @@ namespace InfernoXC
             _poll.Start();
         }
 
+        // Processes that live next to a game but are not the game: anti-cheat, launchers, overlays.
+        static readonly HashSet<string> NotGameNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ExecPubg", "iigw_server", "BEService", "BEService_x64", "BEClient", "BEClient_x64", "vgc", "vgtray", "EasyAntiCheat", "EasyAntiCheat_EOS", "EasyAntiCheat_Launcher", "UnityCrashHandler64", "CrashReportClient"
+        };
+
+        /// <summary>True for anti-cheat and helper processes that must never be boosted or treated as the game.</summary>
+        public static bool IsNotTheGame(string n)
+        {
+            if (string.IsNullOrEmpty(n)) return true;
+            if (NotGameNames.Contains(n)) return true;
+            if (ProfileEngine.IsProtected(n + ".exe")) return true;
+            // common anti-cheat suffixes next to the game exe: TslGame_BE, TslGame_ZK, Game_EAC
+            string l = n.ToLowerInvariant();
+            return l.EndsWith("_be") || l.EndsWith("_zk") || l.EndsWith("_eac") || l.Contains("anticheat") || l.Contains("battleye");
+        }
+
         static void Inspect(int pid, string name)
         {
             lock (_seenPid) { if (_seenPid.ContainsKey(pid)) return; _seenPid[pid] = true; }
             if (string.IsNullOrEmpty(name)) return;
             string n = name;
+            // anti-cheat and game helpers are never treated as the game, so they are never boosted
+            if (IsNotTheGame(n)) return;
             bool game = SysMonitor.IsGameName(n);
             string path = null;
             if (!game)
@@ -418,7 +440,7 @@ namespace InfernoXC
             else if (Settings.GetBool("gm_autostart", false))
             {
                 Say("Auto-start is on: starting " + Selected.Title + " mode");
-                System.Threading.ThreadPool.QueueUserWorkItem(delegate { Start(); });
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate { Start(true); });
             }
         }
 
@@ -483,20 +505,38 @@ namespace InfernoXC
         }
 
         /// <summary>Starts the selected mode. Safe to call from any thread.</summary>
-        public static string Start()
+        public static string Start() { return Start(false); }
+
+        /// <summary>Starts the selected mode. auto = started by game detection (apps are then only closed if the user allowed it).</summary>
+        public static string Start(bool auto)
         {
             lock (_modeLock)
             {
                 if (Active) return "Game Mode is already on.";
                 GmMode m = Effective(Selected);
+                // Streaming safety: with OBS open, Competitive/Heavy would purge memory and leave OBS at normal priority
+                if ((m.Id == "competitive" || m.Id == "heavy") && Settings.GetBool("gm_obs_stream", true) && ObsRunning())
+                {
+                    Say("OBS is running, so Streaming mode is used instead of " + m.Title + " (nothing is purged, OBS gets Above Normal)");
+                    m = Modes.First(x => x.Id == "streaming");
+                }
                 _run = m;
                 _closedNames.Clear(); _stoppedNames.Clear(); _boosted.Clear(); _freedMb = 0;
                 _peakName = ""; _peakCpu = _peakGpu = _peakRam = _peakVram = 0;
-                Say("Starting " + m.Title + " mode");
-                double before = AvailMB();
+                Say("Starting " + m.Title + " mode" + (auto ? " (auto-start: a game was detected)" : ""));
+                SessionBegin();
+                RamCheck();
+                bool lasso = LassoDefers();
+                if (lasso) Say("Process Lasso is running: CPU priorities (game, OBS, browsers) are left to it so the two tools do not fight");
 
                 // 1. close chosen apps
-                foreach (string name in AppsFor(m))
+                List<string> toClose = AppsFor(m);
+                if (auto && toClose.Count > 0 && !Settings.GetBool("gm_autostart_close", false))
+                {
+                    Say("Auto-start: no apps are closed (turn on 'Close apps when auto-started' to allow it)");
+                    toClose = new List<string>();
+                }
+                foreach (string name in toClose)
                 {
                     try
                     {
@@ -531,17 +571,27 @@ namespace InfernoXC
                 Settings.Set("gm_paused", string.Join(",", stopped.ToArray()));
 
                 // 3. memory
+                // Never empties the working sets of running apps (that pushes OBS, Discord and the game
+                // out of RAM and they stutter while it pages back in). Only the standby cache is released,
+                // and only when RAM is actually low and nothing is streaming or recording.
                 if (m.Purge)
                 {
-                    Native.MemoryCommand(2);
-                    Native.MemoryCommand(4);
-                    if (m.AllSvcs) { System.Threading.Thread.Sleep(1500); Native.MemoryCommand(4); }
-                    _freedMb = Math.Max(0, AvailMB() - before);
-                    Say("Memory: emptied standby and idle RAM. Free RAM went up by " + Util.MB(_freedMb));
+                    double avail = AvailMB();
+                    if (ObsRunning())
+                        Say("Memory: left alone because OBS is running (clearing memory mid-stream can cause dropped frames)");
+                    else if (avail >= PurgeBelowMB)
+                        Say("Memory: left alone, " + Util.MB(avail) + " is already free (only cleared below " + Util.MB(PurgeBelowMB) + ")");
+                    else
+                    {
+                        Native.MemoryCommand(4);
+                        _freedMb = Math.Max(0, AvailMB() - avail);
+                        Say("Memory: released standby cache because free RAM was low. Free RAM went up by " + Util.MB(_freedMb));
+                    }
                 }
 
                 // 4. lower background launchers/browsers
-                if (m.LowerBg)
+                if (m.LowerBg && lasso) Say("Priority: launchers and browsers left to Process Lasso");
+                else if (m.LowerBg)
                 {
                     int n = 0;
                     foreach (string name in LowerNames)
@@ -556,7 +606,8 @@ namespace InfernoXC
                 }
 
                 // 5. OBS
-                if (m.ObsUp)
+                if (m.ObsUp && lasso) Say("Priority: OBS left to Process Lasso");
+                else if (m.ObsUp)
                 {
                     int n = 0;
                     foreach (string name in new string[] { "obs64", "obs32", "streamlabs desktop" })
@@ -573,7 +624,8 @@ namespace InfernoXC
 
                 Active = true;
                 Since = DateTime.Now;
-                Summary = "Closed " + _closedNames.Count + " app" + (_closedNames.Count == 1 ? "" : "s") + ", paused " + stopped.Count + " service" + (stopped.Count == 1 ? "" : "s") + (_freedMb > 0 ? ", freed " + Util.MB(_freedMb) + " of RAM" : "") + ".";
+                Summary = "Closed " + _closedNames.Count + " app" + (_closedNames.Count == 1 ? "" : "s") + ", paused " + stopped.Count + " service" + (stopped.Count == 1 ? "" : "s") + (_freedMb > 0 ? ", freed " + Util.MB(_freedMb) + " of RAM" : "") + "."
+                    + (_ramWarn.Length > 0 ? "  " + _ramWarn + "." : "");
                 Settings.SetBool("gm_active", true);
                 Say("Game Mode is on. " + Summary);
                 Detected cur = CurrentGame;
@@ -586,8 +638,11 @@ namespace InfernoXC
         static void ApplyToGame(Detected d)
         {
             GmMode m = _run ?? Effective(Selected);
+            if (IsNotTheGame(d.Name)) { Say("Skipped " + d.Name + ": anti-cheat or helper, never changed"); return; }
             lock (_boosted) { if (_boosted.Contains(d.Pid)) return; _boosted.Add(d.Pid); }
-            if (m.Boost == "High")
+            if (m.Boost == "High" && LassoDefers())
+                Say("Priority: " + d.Name + " left to Process Lasso");
+            else if (m.Boost == "High")
             {
                 int ok = 0; string back = "";
                 foreach (Process p in Process.GetProcessesByName(d.Name))
@@ -619,12 +674,14 @@ namespace InfernoXC
                 if (!Active) return "Game Mode is off.";
                 Say("Ending Game Mode");
                 int n = 0;
+                List<string> notBack = new List<string>();
                 string left = Settings.Get("gm_paused", "");
                 foreach (string s in left.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     Util.Run("net.exe", "start \"" + s + "\"", 30000);
-                    Say("Service " + s + (SvcRunning(s) ? " started again" : " could not be started (it will start on demand)"));
-                    n++;
+                    bool up = SvcRunning(s);
+                    Say("Service " + s + (up ? " started again" : " could not be started (it will start on demand)"));
+                    if (up) n++; else notBack.Add(s);
                 }
                 Settings.Set("gm_paused", "");
                 RestoreToast();
@@ -633,18 +690,159 @@ namespace InfernoXC
                 r.AppendLine("Last session: " + Since.ToString("dd MMM HH:mm") + ", " + _run.Title + " mode, lasted " + dur.ToString(@"hh\:mm\:ss"));
                 r.AppendLine(_peakName.Length > 0 ? "Game: " + _peakName + "  -  peak CPU " + _peakCpu.ToString("0") + "%, peak GPU " + _peakGpu.ToString("0") + "%, peak RAM " + Util.MB(_peakRam) + (_peakVram > 1 ? ", peak VRAM " + Util.MB(_peakVram) : "") + " (measured while it ran)" : "No game was detected during this session.");
                 r.AppendLine("Closed: " + (_closedNames.Count == 0 ? "nothing" : string.Join(", ", _closedNames.ToArray())));
-                r.AppendLine("Paused services: " + (_stoppedNames.Count == 0 ? "none" : string.Join(", ", _stoppedNames.ToArray())) + "  (all started again)");
+                r.AppendLine("Paused services: " + (_stoppedNames.Count == 0 ? "none" : string.Join(", ", _stoppedNames.ToArray())
+                    + (notBack.Count == 0 ? "  (all started again)" : "  (not running again: " + string.Join(", ", notBack.ToArray()) + ", Windows starts them when needed)")));
+                r.Append(SessionRamLines());
                 r.Append("RAM freed at start: " + (_freedMb > 0 ? Util.MB(_freedMb) : "n/a"));
                 LastReport = r.ToString();
-                Settings.Set("gm_last", LastReport);
+                // stored on one line: settings.ini is key=value per line, so a multi-line value lost everything after line 1
+                Settings.Set("gm_last", LastReport.Replace("\r\n", "\\n").Replace("\n", "\\n"));
+                try { if (_csv.Length > 0) File.AppendAllText(_csv, "# " + LastReport.Replace("\r\n", "\r\n# ") + "\r\n", Encoding.ASCII); } catch { }
                 Active = false;
                 _sawGame = false;
-                Summary = "Restored " + n + " service" + (n == 1 ? "" : "s") + ".";
+                Summary = "Restored " + n + " service" + (n == 1 ? "" : "s") + (notBack.Count > 0 ? ", " + notBack.Count + " not running yet (" + string.Join(", ", notBack.ToArray()) + ")" : "") + ".";
                 Settings.SetBool("gm_active", false);
                 Say("Game Mode is off. " + Summary);
                 Action c = Changed; if (c != null) c();
                 return Summary;
             }
+        }
+
+        /// <summary>Standby cache is only released when free RAM is below this.</summary>
+        public const double PurgeBelowMB = 2048;
+
+        /// <summary>Warn when this much RAM is already in use before the game starts.</summary>
+        public const double RamWarnUsedMB = 6144;
+
+        // ---- Process Lasso: when it runs, it owns CPU priorities
+        public static bool LassoRunning()
+        {
+            foreach (string name in new string[] { "ProcessLasso", "ProcessGovernor" })
+            {
+                Process[] ps = Process.GetProcessesByName(name);
+                bool any = ps.Length > 0;
+                foreach (Process p in ps) p.Dispose();
+                if (any) return true;
+            }
+            return false;
+        }
+        static bool LassoDefers() { return Settings.GetBool("gm_lasso_defer", true) && LassoRunning(); }
+
+        // ---- RAM before the game
+        static string _ramWarn = "";
+        public static double TotalMB()
+        {
+            try { return new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory / 1048576.0; } catch { return 0; }
+        }
+
+        /// <summary>The biggest programs by private memory, grouped by name, e.g. "brave 1.6 GB".</summary>
+        public static List<string> TopApps(int n)
+        {
+            Dictionary<string, double> mem = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+            foreach (Process p in Process.GetProcesses())
+            {
+                try
+                {
+                    string name = p.ProcessName;
+                    if (name == "Idle" || name == "System" || name == "Memory Compression" || name == "Registry") continue;
+                    double mb = p.PrivateMemorySize64 / 1048576.0;
+                    double cur; mem.TryGetValue(name, out cur); mem[name] = cur + mb;
+                }
+                catch { }
+                finally { p.Dispose(); }
+            }
+            return mem.OrderByDescending(kv => kv.Value).Take(n).Select(kv => kv.Key + " " + Util.MB(kv.Value)).ToList();
+        }
+
+        /// <summary>Checks how much RAM is in use before the game and names the biggest apps when it is high.</summary>
+        public static string RamCheck()
+        {
+            _ramWarn = "";
+            try
+            {
+                double total = TotalMB(), used = total - AvailMB();
+                if (total <= 0) return "";
+                _startUsedMB = used;
+                if (used < RamWarnUsedMB) { Say("RAM: " + Util.MB(used) + " of " + Util.MB(total) + " in use before the game, that is fine"); return ""; }
+                _ramWarn = "High RAM before the game: " + Util.MB(used) + " of " + Util.MB(total) + " in use. Biggest: " + string.Join(", ", TopApps(5).ToArray());
+                Say("WARNING  " + _ramWarn + ". Close what you do not need for this session.");
+                return _ramWarn;
+            }
+            catch (Exception ex) { Log.Err(ex); return ""; }
+        }
+
+        // ---- RAM over the whole session (report + CSV next to the log)
+        static double _startUsedMB, _sumUsed, _peakUsed, _totalMB;
+        static int _nUsed;
+        static readonly Dictionary<string, double> _appPeak = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        static DateTime _lastCsv = DateTime.MinValue;
+        static string _csv = "";
+
+        static void SessionBegin()
+        {
+            lock (_appPeak) _appPeak.Clear();
+            _startUsedMB = _sumUsed = _peakUsed = _totalMB = 0; _nUsed = 0;
+            _lastCsv = DateTime.MinValue;
+            try
+            {
+                _csv = Path.Combine(Paths.Sub("sessions"), "session-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
+                File.WriteAllText(_csv, "time,ram_used_mb,ram_total_mb,game,game_ram_mb,top1,top1_mb,top2,top2_mb,top3,top3_mb\r\n", Encoding.ASCII);
+            }
+            catch (Exception ex) { _csv = ""; Log.Err(ex); }
+        }
+
+        static string CsvName(string s) { return (s ?? "").Replace(",", " ").Replace("\"", ""); }
+
+        static void RecordRam(SystemSample s)
+        {
+            if (s.RamTotalMB <= 0) return;
+            _totalMB = s.RamTotalMB;
+            _sumUsed += s.RamUsedMB; _nUsed++;
+            if (s.RamUsedMB > _peakUsed) _peakUsed = s.RamUsedMB;
+            lock (_appPeak)
+                foreach (ProcRow r in s.Rows)
+                {
+                    double v;
+                    if (!_appPeak.TryGetValue(r.Name, out v) || r.RamMB > v) _appPeak[r.Name] = r.RamMB;
+                }
+            if (_csv.Length == 0 || (DateTime.Now - _lastCsv).TotalSeconds < 30) return;
+            _lastCsv = DateTime.Now;
+            try
+            {
+                ProcRow g = s.Rows.Where(r => r.IsGame).OrderByDescending(r => r.RamMB).FirstOrDefault();
+                List<ProcRow> top = s.Rows.Where(r => !r.IsGame).OrderByDescending(r => r.RamMB).Take(3).ToList();
+                StringBuilder b = new StringBuilder();
+                b.Append(DateTime.Now.ToString("HH:mm:ss")).Append(',').Append(s.RamUsedMB.ToString("0")).Append(',').Append(s.RamTotalMB.ToString("0")).Append(',');
+                b.Append(g == null ? "" : CsvName(g.Name)).Append(',').Append(g == null ? "" : g.RamMB.ToString("0"));
+                for (int i = 0; i < 3; i++) b.Append(',').Append(i < top.Count ? CsvName(top[i].Name) : "").Append(',').Append(i < top.Count ? top[i].RamMB.ToString("0") : "");
+                File.AppendAllText(_csv, b.ToString() + "\r\n", Encoding.ASCII);
+            }
+            catch { }
+        }
+
+        static string SessionRamLines()
+        {
+            StringBuilder r = new StringBuilder();
+            if (_nUsed > 0)
+                r.AppendLine("RAM during session: at start " + Util.MB(_startUsedMB) + ", average " + Util.MB(_sumUsed / _nUsed) + ", peak " + Util.MB(_peakUsed) + " of " + Util.MB(_totalMB));
+            List<string> big;
+            lock (_appPeak) big = _appPeak.OrderByDescending(kv => kv.Value).Take(6).Select(kv => kv.Key + " " + Util.MB(kv.Value)).ToList();
+            if (big.Count > 0) r.AppendLine("Biggest apps (peak RAM): " + string.Join(", ", big.ToArray()));
+            if (_ramWarn.Length > 0) r.AppendLine(_ramWarn);
+            if (_csv.Length > 0) r.AppendLine("RAM every 30 s: " + _csv);
+            return r.ToString();
+        }
+
+        public static bool ObsRunning()
+        {
+            foreach (string name in new string[] { "obs64", "obs32", "streamlabs desktop", "streamlabs obs" })
+            {
+                Process[] ps = Process.GetProcessesByName(name);
+                bool any = ps.Length > 0;
+                foreach (Process p in ps) p.Dispose();
+                if (any) return true;
+            }
+            return false;
         }
 
         public static double AvailMB()
@@ -661,6 +859,7 @@ namespace InfernoXC
         public static bool Tick(SystemSample s)
         {
             if (!Active) return false;
+            try { RecordRam(s); } catch (Exception ex) { Log.Err("ram record", ex); }
             ProcRow g = s.Rows.Where(r => r.IsGame).OrderByDescending(r => r.Gpu + r.Cpu).FirstOrDefault();
             if (g == null) return false;
             if (_peakName != g.Name) { _peakName = g.Name; _peakCpu = _peakGpu = _peakRam = _peakVram = 0; }
@@ -742,8 +941,11 @@ namespace InfernoXC
 
             // automatic behaviour
             StackPanel au = new StackPanel();
-            au.Children.Add(OptionRow("gm_autostart", false, "Start automatically when a game is detected", "Starts the chosen mode the moment a known game opens. Apps in your close list are shut down without asking, so leave this off if you keep unsaved work open."));
+            au.Children.Add(OptionRow("gm_autostart", false, "Start automatically when a game is detected", "Starts the chosen mode the moment a known game opens. Apps are not closed when it starts this way, unless you turn on the next switch."));
+            au.Children.Add(OptionRow("gm_autostart_close", false, "Close apps when auto-started", "Also closes the apps in your close list when Game Mode starts by itself. Leave off if you keep unsaved work or stream pages open."));
             au.Children.Add(OptionRow("gm_auto", true, "End automatically when the game closes", "Restores services and notifications about six seconds after the last game process exits."));
+            au.Children.Add(OptionRow("gm_obs_stream", true, "Use Streaming mode when OBS is open", "If OBS is running when Game Mode starts, Competitive and Heavy switch to Streaming: nothing is purged mid-stream and OBS gets Above Normal priority."));
+            au.Children.Add(OptionRow("gm_lasso_defer", true, "Let Process Lasso handle priorities", "When Process Lasso is running, Game Mode does not change CPU priorities of the game, OBS or browsers, so the two tools never fight."));
             Body.Children.Add(UK.Section("Automatic", "Detection is always on while this app runs: " + GameMode.DetectorNote + ".", au, false, null));
 
             // custom choices
@@ -777,7 +979,7 @@ namespace InfernoXC
             cu.Children.Add(sv);
             cu.Children.Add(UK.T("Options (Custom mode only)", "H2"));
             ((TextBlock)cu.Children[cu.Children.Count - 1]).Margin = new Thickness(0, 14, 0, 4);
-            cu.Children.Add(OptionRow("gm_purge", true, "Free memory when starting", "Empties standby and idle memory so the game gets clean RAM."));
+            cu.Children.Add(OptionRow("gm_purge", true, "Free memory when starting", "Releases cached memory only when free RAM is under 2 GB. Skipped while OBS is running. Open apps are never pushed out of RAM."));
             cu.Children.Add(OptionRow("gm_prio", true, "Raise the game's CPU priority", "Sets High priority on the detected game."));
             cu.Children.Add(OptionRow("gm_gpu", true, "Prefer the high-performance GPU", "Sets the Windows graphics preference of the game to High performance."));
             Body.Children.Add(UK.Section("Custom choices", "Apps, services and options", cu, false, null));
@@ -811,7 +1013,7 @@ namespace InfernoXC
         {
             ToggleButton sw = UK.Sw(Settings.GetBool(key, def));
             string k = key;
-            sw.Click += delegate { Settings.SetBool(k, sw.IsChecked == true); if (k.StartsWith("gm_p") || k.StartsWith("gm_g")) ShowPlan(); };
+            sw.Click += delegate { Settings.SetBool(k, sw.IsChecked == true); if (k.StartsWith("gm_p") || k.StartsWith("gm_g") || k == "gm_obs_stream" || k == "gm_lasso_defer") ShowPlan(); };
             return UK.Row(title, why, null, sw, false);
         }
 

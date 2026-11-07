@@ -5,13 +5,23 @@ using System.IO;
 using System.Text;
 using System.Threading;
 
+// File details shown in Explorer > Properties > Details (was blank / 0.0.0.0). Keep in step with Brand.Version.
+[assembly: System.Reflection.AssemblyTitle("IXC PC Ready")]
+[assembly: System.Reflection.AssemblyDescription("IXC PC Ready - performance toolkit for Windows gamers")]
+[assembly: System.Reflection.AssemblyCompany("InFerNoxC")]
+[assembly: System.Reflection.AssemblyProduct("IXC PC Ready")]
+[assembly: System.Reflection.AssemblyCopyright("InFerNoxC")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.2.0")]
+
 namespace InfernoXC
 {
     public static class Brand
     {
         public const string Name = "IXC PC Ready";
         public const string Maker = "InFerNoxC";
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
         public const string Tagline = "Performance toolkit for Windows gamers";
         public const string RepoUrl = "https://github.com/infernoxc/ixc-pc-ready";
     }

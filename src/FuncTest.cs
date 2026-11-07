@@ -172,6 +172,38 @@ namespace InfernoXC
                 Check("anti-cheat is never listed", !all.Any(x => ProfileEngine.IsProtected(x.Exe)), "");
             });
 
+            Step("Bug-fix checks (Nov 2026): anti-cheat, memory, updates", delegate
+            {
+                Check("PUBG BattlEye launcher is not treated as the game", GameMode.IsNotTheGame("TslGame_BE"), "");
+                Check("PUBG anti-cheat is not treated as the game", GameMode.IsNotTheGame("TslGame_ZK"), "");
+                Check("PUBG helper ExecPubg is not treated as the game", GameMode.IsNotTheGame("ExecPubg"), "");
+                Check("PUBG itself is still the game", !GameMode.IsNotTheGame("TslGame"), "");
+                Check("Valorant itself is still the game", !GameMode.IsNotTheGame("VALORANT-Win64-Shipping"), "");
+                Check("TslGame_BE is protected from profile changes", ProfileEngine.IsProtected("TslGame_BE.exe"), "");
+                Check("memory is only released below 2 GB free", GameMode.PurgeBelowMB == 2048, "");
+                Check("winget 0x8A150056 is recognised", UpdateKit.IsUserOnly(UpdateKit.ErrUserOnly, ""), "");
+                string why = UpdateKit.Explain(UpdateKit.ErrUserOnly, "The installer cannot be run from an administrator context.", false);
+                Check("winget admin-context error is explained", why != null && why.IndexOf("non-admin", StringComparison.OrdinalIgnoreCase) >= 0, why);
+            });
+
+            Step("New Game Mode features (Nov 2026): OBS, Lasso, RAM", delegate
+            {
+                List<string> top = GameMode.TopApps(5);
+                Check("biggest apps by RAM are listed", top.Count > 0, string.Join(", ", top.ToArray()));
+                Check("total RAM is read", GameMode.TotalMB() > 1000, Util.MB(GameMode.TotalMB()));
+                Check("RAM warning threshold is 6 GB", GameMode.RamWarnUsedMB == 6144, "");
+                bool lasso = GameMode.LassoRunning();
+                Check("Process Lasso detection runs", true, lasso ? "Process Lasso is running" : "Process Lasso is not running");
+                bool obs = GameMode.ObsRunning();
+                Check("OBS detection runs", true, obs ? "OBS is running" : "OBS is not running");
+                List<string> plan = GameMode.Describe(GameMode.Modes.First(x => x.Id == "competitive"));
+                Check("Competitive plan mentions the OBS switch", plan.Any(x => x.IndexOf("OBS is open", StringComparison.OrdinalIgnoreCase) >= 0), "");
+                Check("plan mentions the RAM check", plan.Any(x => x.IndexOf("Check RAM", StringComparison.OrdinalIgnoreCase) >= 0), "");
+                string multi = "line one\r\nline two\r\nline three";
+                string stored = multi.Replace("\r\n", "\\n");
+                Check("session report survives settings.ini (one line, restored to 3)", !stored.Contains("\n") && stored.Replace("\\n", "\r\n") == multi, stored);
+            });
+
             Step("Uninstaller: leftovers found, backed up and removed", delegate
             {
                 string name = "IXC Functest App 7431";
